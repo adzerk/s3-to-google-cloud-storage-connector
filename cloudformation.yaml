@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Infrastructure for transferring Adzerk logs from AWS S3 to GCP Storage
+
+Parameters:
+  LambdaSourceBucket:
+    Type: String
+    Description: The name of the S3 bucket to store the lambda function source in.
+  LambdaSourceKey:
+    Type: String
+    Description: The key of the lambda function source bundle.
+  S3DataBucket:
+    Type: String
+    Description: The name of the S3 bucket your data is currently shipped to.
+  GCPBucket:
+    Type: String
+    Description: The name of the GCP bucket your data will be shipped to.
+
+Resources:
+  LambdaIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:*'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  LambdaHandler:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaIAMRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaSourceBucket
+        S3Key: !Ref LambdaSourceKey
+      Environment:
+        Variables:
+          GOOGLE_APPLICATION_CREDENTIALS: gcp_credentials.json
+          GCP_BUCKET: !Ref GCPBucket
+      Runtime: nodejs10.x
+
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt LambdaHandler.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${S3DataBucket}'
+
+  CustomResourceLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: 'LambdaS3.lambda_handler'
+      Role: !GetAtt LambdaIAMRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaSourceBucket
+        S3Key: custom_resource.zip
+      Runtime: python3.6
+      Timeout: 50
+
+  BucketNotification:
+    Type: 'Custom::RouteTableLambda'
+    DependsOn: LambdaInvokePermission
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambda.Arn
+      LambdaArn: !GetAtt LambdaHandler.Arn
+      Bucket: !Ref S3DataBucket
